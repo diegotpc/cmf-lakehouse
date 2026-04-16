@@ -83,21 +83,25 @@ def main():
             datos = scraper.consultar_trimestre(driver, mes, anio, "C")
             
             # 10. Validar datos y subir a R2
-            if isinstance(datos, dict) and len(datos) > 0:
-                subida_ok = cloud_storage.upload_to_r2(datos, rut_emisor, periodo)
-                
-                if subida_ok:
-                    # ÉXITO TOTAL
-                    update_exito = """
-                        UPDATE log_extraccion_cmf 
-                        SET estado = 'COMPLETADO' 
-                        WHERE id_extraccion = %s;
-                    """
-                    cursor.execute(update_exito, (id_extraccion,))
+            if isinstance(datos, dict):
+                if len(datos) > 0:
+                    subida_ok = cloud_storage.upload_to_r2(datos, rut_emisor, periodo)
+                    if not subida_ok:
+                        raise Exception("Fallo de subida a R2")
                 else:
-                    raise Exception("Fallo de subida a R2")
+                    logger.warning(f"Periodo {periodo} sin datos en CMF. Se omite subida a R2.")
+                
+                # ÉXITO TOTAL (Se marca completado tanto si hubo datos como si es un trimestre vacío)
+                update_exito = """
+                    UPDATE log_extraccion_cmf 
+                    SET estado = 'COMPLETADO' 
+                    WHERE id_extraccion = %s;
+                """
+                cursor.execute(update_exito, (id_extraccion,))
+                
             else:
-                raise Exception(f"Datos inválidos o extraccion fallida. Retornó: {datos}")
+                # Caso de señal "RELOAD" o fallos estructurales
+                raise Exception(f"Extracción fallida o sesión muerta. Retornó: {datos}")
                 
         except Exception as e:
             # Error de Lógica, Extracción o Subida
