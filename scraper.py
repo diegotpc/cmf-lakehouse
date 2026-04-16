@@ -1,3 +1,4 @@
+import os
 import config
 import time
 import logging
@@ -6,6 +7,20 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
+def guardar_evidencia(driver, nombre_archivo):
+    """
+    Sistema de diagnóstico de 'Caja Negra'.
+    Captura un pantallazo y el HTML actual si falla una sincronización.
+    """
+    if not os.path.exists("debug"):
+        os.makedirs("debug")
+        
+    driver.save_screenshot(f"debug/{nombre_archivo}.png")
+    with open(f"debug/{nombre_archivo}.html", "w", encoding="utf-8") as f:
+        f.write(driver.page_source)
+    logging.info(f"Evidencia guardada en debug/{nombre_archivo}.[png/html]")
 
 def extraer_datos_tabla(driver):
     """
@@ -71,9 +86,10 @@ def consultar_trimestre(driver, mes, anio, tipo_balance):
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.ID, "inte_id"))
             )
-        except Exception:
-            logging.warning("⚠️ No se encontró el selector dinámico 'inte_id'. Retornando listado vacío.")
-            return {}
+        except (TimeoutException, NoSuchElementException) as e:
+            logging.error(f"🛑 Fallo de sincronización en 'inte_id'. Generando caja negra...")
+            guardar_evidencia(driver, f"fallo_dropdown_{tipo_balance}")
+            raise e
             
         select_inte = Select(driver.find_element(By.ID, "inte_id"))
         opciones_disponibles = [opt.get_attribute("value") for opt in select_inte.options]

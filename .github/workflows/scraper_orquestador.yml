@@ -38,3 +38,11 @@ jobs:
           R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
         run: |
           python bronze_worker.py
+
+      - name: evidencia-diagnostico-cmf
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencia-diagnostico-cmf
+          path: debug/
+          retention-days: 1
