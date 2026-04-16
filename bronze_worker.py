@@ -22,7 +22,7 @@ def main():
         logger.error("SUPABASE_DB_URL no encontrada en las variables de entorno.")
         return
 
-    # Mantenemos UNA sola instancia del navegador abierta para toda la sesión
+    # Persistencia de Sesión: se reutiliza esta única VM para toda la sesión del worker
     driver = driver_setup.setup_driver(headless=True)
     if not driver:
         raise RuntimeError("No se pudo iniciar el WebDriver")
@@ -35,7 +35,7 @@ def main():
         cursor = conn.cursor()
         
         while True:
-            # 3. Bloqueo Transaccional
+            # Bloqueo Transaccional
             select_query = """
                 SELECT id_extraccion, rut_emisor, periodo 
                 FROM log_extraccion_cmf 
@@ -45,16 +45,15 @@ def main():
             cursor.execute(select_query)
             registro = cursor.fetchone()
             
-            # 4. Condición de salida: Cola vacía
+            # Condición de salida limpia por agotamiento de cola
             if not registro:
                 conn.commit()
-                logger.info("No hay más tareas pendientes. Cerrando orquestador.")
+                logger.info("No existen tareas marcadas como PENDIENTE. Worker drenado cerrando.")
                 break
                 
             id_extraccion, rut_emisor, periodo = registro
-            logger.info(f"\n--- Iniciando Tarea: RUT {rut_emisor} | Periodo {periodo} ---")
+            logger.info(f"\n--- [TAREA BRONZE] FUT: RUT {rut_emisor} | {periodo} ---")
             
-            # 5. Actualizar a EN_PROCESO
             update_proceso_query = "UPDATE log_extraccion_cmf SET estado = 'EN_PROCESO' WHERE id_extraccion = %s;"
             cursor.execute(update_proceso_query, (id_extraccion,))
             conn.commit()
@@ -65,41 +64,54 @@ def main():
             mes = mapa_trimestres.get(trimestre_str)
             
             try:
-                # 8. Navegar y Extraer
-                navegacion_ok = navigation.navigate_to_financial_info(driver, config.URL_BUSQUEDA_CMF, rut_emisor)
-                if not navegacion_ok:
-                    raise Exception("Fallo en la navegación hacia la CMF")
-                    
-                datos = scraper.consultar_trimestre(driver, mes, anio, "C")
+                datos_totales = {}
                 
-                # 10. Validar datos (Parche tolerante a vacíos)
-                if isinstance(datos, dict):
-                    if len(datos) > 0:
-                        subida_ok = cloud_storage.upload_to_r2(datos, rut_emisor, periodo)
-                        if not subida_ok:
-                            raise Exception("Fallo de subida a R2")
-                    else:
-                        logger.warning(f"Periodo {periodo} sin datos en CMF. Se omite subida.")
+                # [INTENTO EXTRACTIVO MODO: C]
+                if navigation.navigate_to_financial_info(driver, config.URL_BUSQUEDA_CMF, rut_emisor):
+                    datos_c = scraper.consultar_trimestre(driver, mes, anio, "C")
+                    if isinstance(datos_c, dict) and datos_c:
+                        for idx_codigo, val in datos_c.items():
+                            datos_totales[f"C_{idx_codigo}"] = val
+                else:
+                    logger.warning(f"Ruta de acceso a información C. fallida para RUT: {rut_emisor}.")
+
+                # [INTENTO EXTRACTIVO MODO: I]
+                # Obligatoriamente volvemos a enviar al navegador al punto de control original
+                if navigation.navigate_to_financial_info(driver, config.URL_BUSQUEDA_CMF, rut_emisor):
+                    datos_i = scraper.consultar_trimestre(driver, mes, anio, "I")
+                    if isinstance(datos_i, dict) and datos_i:
+                        for idx_codigo, val in datos_i.items():
+                            datos_totales[f"I_{idx_codigo}"] = val
+                else:
+                    logger.warning(f"Ruta de acceso a información I. fallida para RUT: {rut_emisor}.")
                     
+                # [RESOLUCIÓN BRONZE]
+                if datos_totales:
+                    subida_ok = cloud_storage.upload_to_r2(datos_totales, rut_emisor, periodo)
+                    if subida_ok:
+                        update_exito = "UPDATE log_extraccion_cmf SET estado = 'COMPLETADO' WHERE id_extraccion = %s;"
+                        cursor.execute(update_exito, (id_extraccion,))
+                    else:
+                        raise Exception("Disrupción asíncrona I/O nube hacia Cloudflare R2")
+                else:
+                    logger.warning(f"Alerta: Sin material tabular recuperable (C/I) para {periodo}. Resolviendo sin fallos.")
                     update_exito = "UPDATE log_extraccion_cmf SET estado = 'COMPLETADO' WHERE id_extraccion = %s;"
                     cursor.execute(update_exito, (id_extraccion,))
-                else:
-                    raise Exception(f"Extracción fallida. Retornó: {datos}")
                     
             except Exception as e:
-                logger.error(f"Error procesando la tarea: {str(e)}")
+                logger.error(f"Pánico local capturado procesando tarea primaria: {str(e)}")
                 update_error = "UPDATE log_extraccion_cmf SET estado = 'ERROR', reintentos = reintentos + 1 WHERE id_extraccion = %s;"
                 cursor.execute(update_error, (id_extraccion,))
                 
             finally:
                 conn.commit()
-                # RETARDO DE CORTESÍA (Evasión de baneo): 4 a 9 segundos entre cada petición
-                tiempo_espera = random.uniform(4.0, 9.0)
-                logger.info(f"Pausa de cortesía: {tiempo_espera:.2f} segundos...")
+                # Retardo de seguridad anti-baneo para firewall de aplicación remota (5 a 12 segs)
+                tiempo_espera = random.uniform(5.0, 12.0)
+                logger.info(f"Sleeping de evasión de cuota CMF: ~{tiempo_espera:.2f}s...")
                 time.sleep(tiempo_espera)
                 
     except Exception as e_critica:
-        logger.critical(f"Error crítico de BD: {str(e_critica)}")
+        logger.critical(f"Seg fault logico de transacción matriz o de DB: {str(e_critica)}")
         
     finally:
         if driver:

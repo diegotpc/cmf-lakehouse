@@ -1,39 +1,37 @@
 import os
 import io
+import csv
 import logging
 import boto3
 from dotenv import load_dotenv
 
-# Configurar el logger base
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def upload_to_r2(data_dict, rut, periodo):
+def upload_to_r2(datos_totales, rut, periodo):
     """
-    Convierte un diccionario de DataFrames a CSV en memoria y los sube 
-    a un bucket de R2.
+    Subida Agnóstica Bronze 2.0. Exporta cada Key del diccionario de reportes
+    en su propio archivo local .CSV sobre la capa de objetos distribuidos usando R2.
+    El dict usa llaves como 'C_210000' o 'I_810000'.
     
     Args:
-        data_dict (dict): Diccionario donde la llave es el 'codigo_xbrl' y el valor es el DataFrame.
-        rut (str/int): RUT del emisor.
-        periodo (str): Periodo de extracción.
+        datos_totales (dict): El master dict de Consolidados e Individuales de un RUT/Periodo.
+        rut (str/int): RUT del emisor base.
+        periodo (str): Cadena textual de la ventana temporal.
         
     Returns:
-        bool: True si todo se sube correctamente, False si ocurre algún error.
+        bool: Control de status operacional.
     """
     try:
-        # Cargar credenciales desde .env
         load_dotenv()
         r2_access_key = os.getenv("R2_ACCESS_KEY")
         r2_secret_key = os.getenv("R2_SECRET_KEY")
         r2_endpoint_url = os.getenv("R2_ENDPOINT_URL")
 
-        # Validar si existen todas las variables de entorno necesarias
         if not all([r2_access_key, r2_secret_key, r2_endpoint_url]):
-            logger.error("Faltan variables de entorno para R2 (R2_ACCESS_KEY, R2_SECRET_KEY o R2_ENDPOINT_URL)")
+            logger.error("Error crítico: Credenciales AWS/R2 huérfanas en el entorno (.env).")
             return False
 
-        # Inicializar el cliente S3 para Cloudflare R2
         s3_client = boto3.client(
             service_name='s3',
             endpoint_url=r2_endpoint_url,
@@ -43,25 +41,31 @@ def upload_to_r2(data_dict, rut, periodo):
         
         bucket_name = "cmf-bronze"
 
-        # Iterar el diccionario y subir cada DataFrame como CSV
-        for codigo_xbrl, df in data_dict.items():
-            # Convertir DataFrame a CSV crudo en memoria
+        for tipo_codigo, doc_obj in datos_totales.items():
             csv_buffer = io.StringIO()
-            df.to_csv(csv_buffer, index=False)
+            # La orden es respetar delimitador por `;` y dejar valores agnósticos
+            writer = csv.writer(csv_buffer, delimiter=';', quotechar='"', quoting=csv.QUOTE_MINIMAL)
             
-            # Construir la llave del objeto (ruta del archivo en el bucket)
-            object_key = f"rut={rut}/periodo={periodo}/{codigo_xbrl}.csv"
+            headers = doc_obj.get("headers", [])
+            if headers:
+                writer.writerow(headers)
+                
+            data_rows = doc_obj.get("data", [])
+            for row in data_rows:
+                writer.writerow(row)
             
-            # Subir a R2
+            # File key estandarizado
+            object_key = f"rut={rut}/periodo={periodo}/{tipo_codigo}.csv"
+            
             s3_client.put_object(
                 Bucket=bucket_name,
                 Key=object_key,
                 Body=csv_buffer.getvalue()
             )
-            logger.info(f"Subida exitosa a R2: s3://{bucket_name}/{object_key}")
+            logger.info(f"☁️ Fragmento guardado en Bronze (R2): s3://{bucket_name}/{object_key}")
             
         return True
 
     except Exception as e:
-        logger.error(f"Error técnico durante la subida a R2: {str(e)}")
+        logger.error(f"Falla fatal enviando I/O sobre R2: {str(e)}")
         return False
