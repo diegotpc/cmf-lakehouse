@@ -5,11 +5,8 @@ on:
 
 jobs:
   scrape_job:
-    name: Worker ${{ matrix.runner }}
+    name: Worker Unico Secuencial
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        runner: [1, 2, 3, 4, 5]
     
     steps:
       - name: Clonar repositorio
@@ -27,7 +24,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
           rm google-chrome-stable_current_amd64.deb
-          google-chrome --version
 
       - name: Instalar dependencias de Python
         run: |
